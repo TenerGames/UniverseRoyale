@@ -18,12 +18,6 @@ use uuid::Uuid;
 use crate::NetworkSide;
 use crate::systems::client_connection::ClientComponent;
 
-#[derive(PartialEq)]
-pub enum StreamType{
-    Tcp,
-    Udp,
-}
-
 #[typetag::serde]
 pub trait MessageTrait: Send + Sync + Any {
     fn as_any(&self) -> &dyn Any;

@@ -1731,6 +1731,7 @@ dependencies = [
  "bevy",
  "bevy-inspector-egui",
  "log",
+ "message_derive",
  "shared",
  "tokio",
  "uuid",
@@ -3009,6 +3010,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "message_derive"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "metal"
 version = "0.31.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4187,6 +4197,7 @@ dependencies = [
  "bevy",
  "bevy-inspector-egui",
  "log",
+ "message_derive",
  "shared",
  "tokio",
  "uuid",
@@ -4210,6 +4221,7 @@ dependencies = [
  "bincode",
  "erased-serde",
  "log",
+ "message_derive",
  "serde",
  "tokio",
  "typetag",
@@ -4395,9 +4407,9 @@ dependencies = [
 
 [[package]]
 name = "syn"
-version = "2.0.104"
+version = "2.0.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "17b6f705963418cdb9927482fa304bc562ece2fdd4f616084c50b7023b435a40"
+checksum = "ede7c438028d4436d71104916910f5bb611972c5cfd7f89b8300a8186e6fada6"
 dependencies = [
  "proc-macro2",
  "quote",

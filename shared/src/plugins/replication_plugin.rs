@@ -8,6 +8,7 @@ use bevy::prelude::{Commands, EventWriter, First, IntoScheduleConfigs, Last, Plu
 use serde::{Deserialize, Serialize};
 use tokio::runtime::Runtime;
 use uuid::Uuid;
+use message_derive::Message;
 use crate::{NetworkSide};
 use crate::systems::client_connection::ClientComponent;
 use crate::systems::stream_connection::{register_message_type, ClientConnectedEvent, ConnectionTrait, ConnectionType, ConnectionsClient, ConnectionsServer, MessageTrait, DISPATCHERS};
@@ -17,16 +18,9 @@ pub struct ReplicationPlugin{
     pub network_side: NetworkSide
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Message)]
 pub struct MyMessage{
     pub test: String,
-}
-
-#[typetag::serde]
-impl MessageTrait for MyMessage{
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
 }
 
 impl Plugin for ReplicationPlugin {

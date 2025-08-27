@@ -8,6 +8,7 @@ name = "shared"
 path = "src/lib.rs"
 
 [dependencies]
+message_derive = { path = "../message_derive" }
 bevy = {workspace = true}
 log = {workspace = true}
 tokio = {workspace = true}

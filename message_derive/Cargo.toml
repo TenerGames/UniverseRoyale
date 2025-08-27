@@ -1,0 +1,12 @@
+[package]
+name = "message_derive"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+quote = "1.0.40"
+syn = "2.0.106"
+proc-macro2 = "1"

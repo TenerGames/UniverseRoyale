@@ -1,0 +1,37 @@
+[workspace]
+members = [
+    "client",
+    "server",
+    "shared"
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
+bevy = { version = "0.16" , features = ["dynamic_linking"] }
+log = { version = "*", features = ["max_level_debug", "release_max_level_warn"] }
+tokio = {version = "1.46.1", features = ["full"]}
+uuid = { version = "1", features = ["v4"] }
+bevy-inspector-egui = {version = "0.32.0"}
+serde = { version = "1.0.219", features = ["derive", "std", "rc"] }
+bincode = { version = "2.0.1", features = ["serde"] }
+erased-serde = {version = "0.4.6"}
+typetag = {version = "0.2.20"}
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+
+[profile.wasm-release]
+inherits = "release"
+opt-level = "s"
+strip = "debuginfo"

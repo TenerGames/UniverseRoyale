@@ -1,0 +1,12 @@
+[package]
+name = "client"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+bevy = {workspace = true}
+log = {workspace = true}
+tokio = {workspace = true}
+uuid = {workspace = true}
+shared = { path = "../shared" }
+bevy-inspector-egui = {workspace = true}

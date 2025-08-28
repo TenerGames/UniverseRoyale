@@ -2,8 +2,8 @@
 use std::collections::{HashMap};
 use std::io::Cursor;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
-use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex, Weak};
+use std::sync::atomic::{AtomicBool, Ordering};
 use bevy::app::App;
 use bevy::prelude::{Event, Resource, World};
 use bincode::config::standard;
@@ -28,8 +28,8 @@ pub enum ConnectionType{
         listener: Option<Arc<TcpListener>>,
         receiver_connection_stabilized: Option<UnboundedReceiver<Arc<TcpListener>>>,
         local_client_connection: Option<Arc<Mutex<ClientComponent>>>,
-        started: bool,
-        runtime: Option<Runtime>,
+        started: Arc<AtomicBool>,
+        runtime: Option<Arc<Runtime>>,
         address: String,
         network_side: NetworkSide,
         connection_name: String,
@@ -121,8 +121,10 @@ impl Drop for ConnectionType{
                 runtime,
                 ..
             } => {
-                if let Some(runtime) = runtime.take(){
-                    runtime.shutdown_background()
+                if let Some(runtime) = runtime.take() {
+                    if let Ok(runtime) = Arc::try_unwrap(runtime) {
+                        runtime.shutdown_background();
+                    }
                 }
             }
             ConnectionType::Udp {
@@ -140,8 +142,7 @@ impl Drop for ConnectionType{
 }
 
 impl ConnectionTrait for ConnectionType{
-    #[tokio::main]
-    async fn start(&mut self) {
+    fn start(&mut self) {
         if !self.can_start() {return;}
 
         match self {
@@ -160,14 +161,16 @@ impl ConnectionTrait for ConnectionType{
                 receiver_local_tcp_connected,
                 client_connected_receiver
             } => {
-                *started = true;
+                started.store(true, Ordering::SeqCst);
 
                 if network_side == &NetworkSide::Server {
                     let (sender, receiver) = unbounded_channel::<Arc<TcpListener>>();
                     let (sender_connected, mut receiver_connected) = unbounded_channel::<(TcpStream, SocketAddr)>();
                     let (sender_client_connected,receiver_client_connected) = unbounded_channel::<(Arc<SocketAddr>,String)>();
                     let (sender_message, receiver_message) = unbounded_channel::<(Box<dyn MessageTrait>, Option<Uuid>)>();
-                    let new_runtime = Runtime::new().unwrap();
+                    let new_runtime =  Arc::new(Runtime::new().unwrap());
+                    let weak_runtime = Arc::downgrade(&new_runtime);
+                    let client_weak_runtime = Arc::downgrade(&new_runtime);
                     let address_clone = address.clone();
                     let clients_connected_arc = Arc::downgrade(&clients_connected);
                     let connection_name_clone = connection_name.clone();
@@ -178,148 +181,169 @@ impl ConnectionTrait for ConnectionType{
                     *messages_sender = Some(Arc::new(sender_message));
                     *client_connected_receiver = Some(receiver_client_connected);
 
-                    runtime.as_ref().unwrap().spawn(async move {
-                        let listener_arc = Arc::new(match TcpListener::bind(address_clone).await {
-                            Ok(l) => l,
-                            Err(_) => return
+                    if let Some(runtime) = weak_runtime.upgrade() {
+                        runtime.spawn(async move {
+                            let listener_arc = Arc::new(match TcpListener::bind(address_clone).await {
+                                Ok(l) => l,
+                                Err(_) => return
+                            });
+                            let weak_listener = Arc::downgrade(&listener_arc);
+
+                            match sender.send(listener_arc) {
+                                Ok(_) => {},
+                                Err(_) => return
+                            };
+
+                            loop {
+                                if let Some(listener) = weak_listener.upgrade() {
+                                    match listener.accept().await {
+                                        Ok((stream,socket)) => {
+                                            match sender_connected.send((stream,socket)) {
+                                                Ok(_) => {},
+                                                Err(_) => (),
+                                            };
+                                        }
+                                        Err(e) => {
+                                            print!("Error: {}", e);
+                                        }
+                                    }
+                                }else {
+                                    println!("Disconnected");
+                                    break;
+                                }
+                            }
                         });
-                        let weak_listener = Arc::downgrade(&listener_arc);
 
-                        match sender.send(listener_arc) {
-                            Ok(_) => {},
-                            Err(_) => return
-                        };
+                        runtime.spawn(async move {
+                            loop {
+                                if let Some(clients_connected) = clients_connected_arc.upgrade() {
+                                    match receiver_connected.recv().await {
+                                        Some((stream,socket)) => {
+                                            let mut queue = clients_connected.lock().unwrap();
+                                            let uuid = Uuid::new_v4();
 
-                        loop {
-                            if let Some(listener) = weak_listener.upgrade() {
-                                match listener.accept().await {
-                                    Ok((stream,socket)) => {
-                                        match sender_connected.send((stream,socket)) {
-                                            Ok(_) => {},
-                                            Err(_) => (),
-                                        };
+                                            let (read_half, write_half) = stream.into_split();
+
+                                            let client_component = ClientComponent{
+                                                write_half: Arc::new(TokioMutex::new(write_half)),
+                                                read_half: Arc::new(TokioMutex::new(read_half)),
+                                                socket_addr: Arc::new(socket),
+                                                connection_name: connection_name_clone.clone(),
+                                                network_side: NetworkSide::Server,
+                                                listening: false,
+                                                runtime: Some(Weak::clone(&client_weak_runtime)),
+                                                connection_dropped: Arc::new(AtomicBool::new(false)),
+                                                uuid
+                                            };
+
+                                            match sender_client_connected.send((Arc::clone(&client_component.socket_addr),connection_name_clone.clone())) {
+                                                Ok(_) => {},
+                                                Err(_) => (),
+                                            };
+
+                                            queue.insert(uuid, client_component);
+                                        },
+                                        None => {
+                                            break
+                                        }
                                     }
-                                    Err(e) => {
-                                        print!("Error: {}", e);
-                                    }
+                                }else {
+                                    break;
                                 }
-                            }else {
-                                println!("Disconnected");
-                                break;
                             }
-                        }
-                    });
+                        });
+                    }
 
-                    runtime.as_ref().unwrap().spawn(async move {
-                        loop {
-                            if let Some(clients_connected) = clients_connected_arc.upgrade() {
-                                match receiver_connected.recv().await {
-                                    Some((stream,socket)) => {
-                                        let mut queue = clients_connected.lock().unwrap();
-                                        let uuid = Uuid::new_v4();
-
-                                        let (read_half, write_half) = stream.into_split();
-
-                                        let client_component = ClientComponent{
-                                            write_half: Arc::new(TokioMutex::new(write_half)),
-                                            read_half: Arc::new(TokioMutex::new(read_half)),
-                                            socket_addr: Arc::new(socket),
-                                            connection_name: connection_name_clone.clone(),
-                                            network_side: NetworkSide::Server,
-                                            listening: false,
-                                            runtime: Some(Runtime::new().unwrap()),
-                                            connection_dropped: Arc::new(AtomicBool::new(false)),
-                                            uuid
-                                        };
-
-                                        match sender_client_connected.send((Arc::clone(&client_component.socket_addr),connection_name_clone.clone())) {
-                                            Ok(_) => {},
-                                            Err(_) => (),
-                                        };
-
-                                        queue.insert(uuid, client_component);
-                                    },
-                                    None => {
-                                        break
-                                    }
-                                }
-                            }else {
-                                break;
-                            }
-                        }
-                    });
                 }else {
                     let (sender, receiver) = unbounded_channel::<Option<(Arc<TokioMutex<OwnedReadHalf>>,Arc<TokioMutex<OwnedWriteHalf>>, SocketAddr)>>();
                     let (sender_message, receiver_message) = unbounded_channel::<(Box<dyn MessageTrait>,Option<Uuid>)>();
-                    let new_runtime = Runtime::new().unwrap();
+                    let new_runtime =  Arc::new(Runtime::new().unwrap());
+                    let weak_runtime = Arc::downgrade(&new_runtime);
                     let address_clone = address.clone();
+                    let started_arc = Arc::downgrade(&started);
 
                     *receiver_local_tcp_connected = Some(receiver);
                     *runtime = Some(new_runtime);
                     *messages_receiver = Some(receiver_message);
 
-                    runtime.as_ref().unwrap().spawn(async move {
-                        let tcp_stream;
+                    if let Some(runtime) = weak_runtime.upgrade() {
+                        runtime.spawn(async move {
+                            let tcp_stream;
 
-                        loop {
-                            tcp_stream = match TcpStream::connect(&address_clone).await {
-                                Ok(s) => { println!("Connected to server: {}", &s.peer_addr().unwrap()); s},
-                                Err(e) => { println!("Error trying connect: {} ", e);
-                                    continue;
-                                }
+                            loop {
+                                tcp_stream = match TcpStream::connect(&address_clone).await {
+                                    Ok(s) => { println!("Connected to server: {}", &s.peer_addr().unwrap()); s},
+                                    Err(e) => { println!("Error trying connect: {} ", e);
+                                        continue;
+                                    }
+                                };
+
+                                break
+                            }
+
+                            let socket_address = match tcp_stream.local_addr() {
+                                Ok(a) => a,
+                                Err(_) => {return;}
                             };
 
-                            break
-                        }
+                            let (read_half, write_half) = tcp_stream.into_split();
 
-                        let socket_address = match tcp_stream.local_addr() {
-                            Ok(a) => a,
-                            Err(_) => {return;}
-                        };
+                            let read_half = Arc::new(TokioMutex::new(read_half));
 
-                        let (read_half, write_half) = tcp_stream.into_split();
+                            sender.send(Some((Arc::clone(&read_half), Arc::new(TokioMutex::new(write_half)), socket_address))).unwrap();
 
-                        let read_half = Arc::new(TokioMutex::new(read_half));
+                            loop {
+                                let mut read_half_mutex = read_half.lock().await;
 
-                        sender.send(Some((Arc::clone(&read_half), Arc::new(TokioMutex::new(write_half)), socket_address))).unwrap();
+                                match read_half_mutex.read_u32().await {
+                                    Ok(length) => {
+                                        let mut buf = vec![0u8; length as usize];
 
-                        loop {
-                            let mut read_half_mutex = read_half.lock().await;
-
-                            match read_half_mutex.read_u32().await {
-                                Ok(length) => {
-                                    let mut buf = vec![0u8; length as usize];
-
-                                    match read_half_mutex.read_exact(&mut buf).await {
-                                        Ok(_) => {
-                                            if let Some(message) = deserialize_message(&buf) {
-                                                match sender_message.send((message,None)) {
-                                                    Ok(_) => {
-                                                        println!("Message sent");
-                                                    },
-                                                    Err(e) => println!("Error sending message: {:?}", e)
-                                                };
-                                            } else {
-                                                println!("Mensagem não registrada ou falha na desserialização");
+                                        match read_half_mutex.read_exact(&mut buf).await {
+                                            Ok(_) => {
+                                                if let Some(message) = deserialize_message(&buf) {
+                                                    match sender_message.send((message,None)) {
+                                                        Ok(_) => {
+                                                            println!("Message sent");
+                                                        },
+                                                        Err(e) => println!("Error sending message: {:?}", e)
+                                                    };
+                                                } else {
+                                                    println!("Mensagem não registrada ou falha na desserialização");
+                                                }
+                                            },
+                                            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof
+                                                || e.kind() == std::io::ErrorKind::ConnectionReset
+                                                || e.kind() == std::io::ErrorKind::BrokenPipe =>
+                                                {
+                                                    println!("Server disconnected, lets try reconnect...");
+                                                    if let Some(started_upgraded) = started_arc.upgrade(){
+                                                        started_upgraded.store(false, Ordering::SeqCst);
+                                                    }
+                                                    break;
+                                                }
+                                            Err(other_e) => {
+                                                println!("Error: {:?}", other_e);
                                             }
-                                        },
-                                        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                                            break;
-                                        }
-                                        Err(other_e) => {
-                                            println!("Error: {:?}", other_e);
                                         }
                                     }
-                                }
-                                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                                    break;
-                                }
-                                Err(other_e) => {
-                                    println!("Error: {:?}", other_e);
+                                    Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof
+                                        || e.kind() == std::io::ErrorKind::ConnectionReset
+                                        || e.kind() == std::io::ErrorKind::BrokenPipe =>
+                                        {
+                                            println!("Server disconnected, lets try reconnect...");
+                                            if let Some(started_upgraded) = started_arc.upgrade(){
+                                                started_upgraded.store(false, Ordering::SeqCst);
+                                            }
+                                            break;
+                                        }
+                                    Err(other_e) => {
+                                        println!("Error: {:?}", other_e);
+                                    }
                                 }
                             }
-                        }
-                    });
+                        });
+                    }
                 }
             }
             ConnectionType::Udp {
@@ -342,7 +366,7 @@ impl ConnectionTrait for ConnectionType{
                 receiver_connection_stabilized: _receiver_connection_stabilized,
                 ..
             } => {
-               !*started
+               !started.load(Ordering::SeqCst)
             }
             ConnectionType::Udp {
                 udp_socket: _udp_socket,
@@ -369,7 +393,7 @@ impl ConnectionsTrait for ConnectionsServer{
             listener: None,
             receiver_connection_stabilized: None,
             local_client_connection: None,
-            started: false,
+            started: Arc::new(AtomicBool::new(false)),
             runtime: None,
             address,
             network_side: NetworkSide::Server,
@@ -397,8 +421,7 @@ impl ConnectionsTrait for ConnectionsServer{
 }
 
 impl ConnectionsTrait for ConnectionsClient{
-    #[tokio::main]
-    async fn make_tcp_connection(&mut self, address: String, connection_name: String){
+    fn make_tcp_connection(&mut self, address: String, connection_name: String){
         if !self.can_connect(&connection_name) {return;}
 
         let connection_name_clone = connection_name.clone();
@@ -407,7 +430,7 @@ impl ConnectionsTrait for ConnectionsClient{
             listener: None,
             receiver_connection_stabilized: None,
             local_client_connection: None,
-            started: false,
+            started: Arc::new(AtomicBool::new(false)),
             runtime: None,
             address,
             network_side: NetworkSide::Client,

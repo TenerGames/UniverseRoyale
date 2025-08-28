@@ -6,7 +6,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use bevy::app::{App, Update};
 use bevy::prelude::{Commands, EventWriter, First, IntoScheduleConfigs, Last, Plugin, ResMut, World};
 use serde::{Deserialize, Serialize};
-use tokio::runtime::Runtime;
 use uuid::Uuid;
 use message_derive::Message;
 use crate::{NetworkSide};
@@ -256,7 +255,7 @@ pub fn client_tcp_connected(
             listener : _listener,
             local_client_connection,
             started,
-            runtime: _runtime,
+            runtime,
             address: _address,
             network_side: _network_side,
             receiver_connection_stabilized: _receiver_connection_stabilized,
@@ -270,6 +269,11 @@ pub fn client_tcp_connected(
             if local_client_connection.is_some() {continue}
 
             if let Some(receiver) = receiver_local_tcp_connected {
+               let runtime_arc = match runtime {
+                   Some(runtime) => runtime,
+                   None => return
+               };
+
                match receiver.try_recv() {
                    Ok(message) => {
                        if let Some((read_half,write_half,socket_address)) = message {
@@ -280,7 +284,7 @@ pub fn client_tcp_connected(
                                connection_name: connection_name.clone(),
                                network_side: NetworkSide::Client,
                                listening: true,
-                               runtime: Some(Runtime::new().unwrap()),
+                               runtime: Some(Arc::downgrade(runtime_arc)),
                                connection_dropped: Arc::new(AtomicBool::new(false)),
                                uuid: Uuid::new_v4(),
                            };
@@ -293,7 +297,7 @@ pub fn client_tcp_connected(
                               }));
                            }
                        }else {
-                           *started = false
+                           started.store(false, Ordering::SeqCst);
                        }
                    }
                    Err(_) => {}

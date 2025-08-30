@@ -4222,6 +4222,7 @@ dependencies = [
  "erased-serde",
  "log",
  "message_derive",
+ "paste",
  "serde",
  "tokio",
  "typetag",

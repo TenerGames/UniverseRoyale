@@ -20,6 +20,7 @@ serde = { version = "1.0.219", features = ["derive", "std", "rc"] }
 bincode = { version = "2.0.1", features = ["serde"] }
 erased-serde = {version = "0.4.6"}
 typetag = {version = "0.2.20"}
+paste = {version = "1.0.15"}
 
 [profile.dev]
 opt-level = 1

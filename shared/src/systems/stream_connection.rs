@@ -24,12 +24,25 @@ pub trait MessageTrait: Send + Sync + Any {
     fn as_any(&self) -> &dyn Any;
 }
 
-#[derive(Eq,PartialEq)]
-pub enum BytesOptions{
+#[derive(Debug, Clone, Copy)]
+pub enum BytesOptions {
+    // unsigned
+    U8,
+    U16,
     U32,
-    F32,
     U64,
-    F64
+    U128,
+
+    // signed
+    I8,
+    I16,
+    I32,
+    I64,
+    I128,
+
+    // float
+    F32,
+    F64,
 }
 
 #[derive(Eq,PartialEq)]

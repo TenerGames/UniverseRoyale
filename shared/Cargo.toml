@@ -18,3 +18,4 @@ serde = {workspace = true}
 bincode = {workspace = true}
 erased-serde = {workspace = true}
 typetag = {workspace = true}
+paste = {workspace = true}

@@ -10,7 +10,8 @@ use tokio::sync::mpsc::{UnboundedSender};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 use crate::NetworkSide;
-use crate::systems::stream_connection::{deserialize_message, MessageTrait};
+use crate::systems::stream_connection::{deserialize_message, MessageTrait,TcpSettings};
+use crate::systems::tcp_settings_functions::{read_value_from_settings, write_value_from_settings};
 
 pub struct ClientComponent {
     pub write_half: Arc<Mutex<OwnedWriteHalf>>,
@@ -21,6 +22,7 @@ pub struct ClientComponent {
     pub listening: bool,
     pub runtime: Option<Weak<Runtime>>,
     pub connection_dropped: Arc<AtomicBool>,
+    pub tcp_settings: Weak<TcpSettings>,
     pub uuid: Uuid
 }
 
@@ -37,7 +39,7 @@ impl ClientComponent {
         let write_half_downcast = Arc::downgrade(&self.write_half);
         let config = standard();
         let encoded = encode_to_vec(&message, config).unwrap();
-        let length = encoded.len() as u32;
+        let tcp_settings = Weak::clone(&self.tcp_settings).upgrade().unwrap();
         
         if let Some(weak_runtime) = &self.runtime {
             if let Some(runtime) = weak_runtime.upgrade() {
@@ -45,11 +47,11 @@ impl ClientComponent {
                     if let Some(write_half) = write_half_downcast.upgrade() {
                         let mut write_half = write_half.lock().await;
 
-                        match write_half.write_u32(length).await {
+                        match write_value_from_settings(&mut write_half, &encoded, &tcp_settings).await {
                             Ok(_) => {
                                 match write_half.write_all(&encoded).await {
                                     Ok(_) => {
-                                        println!("Sent Message");
+
                                     },
                                     Err(_) => {
                                         println!("Failed to send Message");
@@ -57,7 +59,7 @@ impl ClientComponent {
                                 }
                             },
                             Err(_) => {
-
+                                println!("error to send message")
                             }
                         }
                     };
@@ -72,7 +74,7 @@ impl ClientComponent {
         let write_half_downcast = Arc::downgrade(&self.write_half);
         let config = standard();
         let encoded = encode_to_vec(&message, config).unwrap();
-        let length = encoded.len() as u32;
+        let tcp_settings = Weak::clone(&self.tcp_settings).upgrade().unwrap();
 
         if let Some(weak_runtime) = &self.runtime {
             if let Some(runtime) = weak_runtime.upgrade() {
@@ -80,7 +82,7 @@ impl ClientComponent {
                     if let Some(write_half) = write_half_downcast.upgrade() {
                         let mut write_half = write_half.lock().await;
 
-                        match write_half.write_u32(length).await {
+                        match write_value_from_settings(&mut write_half, &encoded, &tcp_settings).await {
                             Ok(_) => {
                                 match write_half.write_all(&encoded).await {
                                     Ok(_) => {
@@ -101,7 +103,6 @@ impl ClientComponent {
                 });
             }
         }
-        
     }
 
     pub fn start_listening_client(&mut self, sender_message: Weak<UnboundedSender<(Box<dyn MessageTrait>, Option<Uuid>)>>) {
@@ -111,6 +112,7 @@ impl ClientComponent {
         let read_half_downcast = Arc::downgrade(&self.read_half);
         let arc_connection_dropped = Arc::downgrade(&self.connection_dropped);
         let uuid = self.uuid.clone();
+        let tcp_settings = Weak::clone(&self.tcp_settings).upgrade().unwrap();
 
         self.listening = true;
 
@@ -121,21 +123,12 @@ impl ClientComponent {
                         if let Some(read_half) = read_half_downcast.upgrade() {
                             let mut read_half = read_half.lock().await;
 
-                            match read_half.read_u32().await {
-                                Ok(length) => {
-                                    let mut buf = vec![0u8; length as usize];
-
-                                    match read_half.read_exact(&mut buf).await {
-                                        Ok(0) => {
-                                            if let Some(arc_connection_dropped) = arc_connection_dropped.upgrade() {
-                                                arc_connection_dropped.store(true, atomic::Ordering::SeqCst);
-                                            }
-                                            println!("Connection dropped from no value");
-                                            break
-                                        },
+                            match read_value_from_settings(&mut read_half, &tcp_settings).await {
+                                Ok(mut value) => {
+                                    match read_half.read_exact(&mut value).await {
                                         Ok(_) => {
                                             if let Some(sender_message) = sender_message.upgrade() {
-                                                if let Some(message) = deserialize_message(&buf) {
+                                                if let Some(message) = deserialize_message(&value) {
                                                     match sender_message.send((message,Some(uuid.clone()))) {
                                                         Ok(_) => {
 
@@ -147,19 +140,31 @@ impl ClientComponent {
                                                 }
                                             }
                                         },
+                                        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                                            if let Some(arc_connection_dropped) = arc_connection_dropped.upgrade() {
+                                                arc_connection_dropped.store(true, atomic::Ordering::SeqCst);
+                                            }
+                                            println!("Client connection dropped\
+                                            ");
+                                            break;
+                                        }
                                         Err(_) => {
                                             println!("Fatal error")
                                         }
                                     }
                                 },
-                                Err(_) => {
+                                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                                     if let Some(arc_connection_dropped) = arc_connection_dropped.upgrade() {
                                         arc_connection_dropped.store(true, atomic::Ordering::SeqCst);
                                     }
-                                    println!("Failed to read from stream");
-                                    break
+                                    println!("Client connection dropped\
+                                            ");
+                                    break;
                                 }
-                            }
+                                Err(_) => {
+                                    println!("Fatal error")
+                                }
+                            };
                         }else {
                             if let Some(arc_connection_dropped) = arc_connection_dropped.upgrade() {
                                 arc_connection_dropped.store(true, atomic::Ordering::SeqCst);

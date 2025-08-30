@@ -1,14 +1,19 @@
+use std::net::{IpAddr, Ipv4Addr};
 use bevy::app::Update;
 use bevy::DefaultPlugins;
-use bevy::prelude::{App, EventReader, IntoScheduleConfigs, ResMut};
+use bevy::prelude::{default, App, EventReader, IntoScheduleConfigs, ResMut};
 use shared::NetworkSide;
 use shared::plugins::replication_plugin::{MyMessage, ReplicationPlugin};
-use shared::systems::stream_connection::{ConnectionsClient, ConnectionsTrait, MessageReceived};
+use shared::systems::stream_connection::{ConnectionsClient, ConnectionsTrait, MessageReceived, TcpSettings};
 
 pub mod plugins;
 
 pub fn test(mut connections_client: ResMut<ConnectionsClient>){
-    connections_client.make_tcp_connection("127.0.0.1:8080".to_string(),"Lobby".to_string());
+    connections_client.make_tcp_connection(TcpSettings{
+        address: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+        port: 8080,
+        ..default()
+    },"Lobby".to_string());
 }
 
 pub fn message_received(

@@ -1,13 +1,12 @@
 ﻿use std::any::{Any, TypeId};
 use std::collections::{HashMap};
-use std::io::Cursor;
-use std::net::SocketAddr;
+use std::io::{Cursor};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex, Weak};
 use std::sync::atomic::{AtomicBool, Ordering};
 use bevy::app::App;
 use bevy::prelude::{Event, Resource, World};
 use bincode::config::standard;
-use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::runtime::Runtime;
@@ -17,10 +16,33 @@ use typetag::__private::once_cell::sync::Lazy;
 use uuid::Uuid;
 use crate::NetworkSide;
 use crate::systems::client_connection::ClientComponent;
+use tokio::io::{AsyncReadExt};
+use crate::systems::tcp_settings_functions::read_value_from_settings;
 
 #[typetag::serde]
 pub trait MessageTrait: Send + Sync + Any {
     fn as_any(&self) -> &dyn Any;
+}
+
+#[derive(Eq,PartialEq)]
+pub enum BytesOptions{
+    U32,
+    F32,
+    U64,
+    F64
+}
+
+#[derive(Eq,PartialEq)]
+pub enum OrderOptions{
+    LittleEndian,
+    BigEndian
+}
+
+pub struct TcpSettings {
+    pub address: IpAddr,
+    pub port: u16,
+    pub bytes: BytesOptions,
+    pub order: OrderOptions
 }
 
 pub enum ConnectionType{
@@ -30,7 +52,7 @@ pub enum ConnectionType{
         local_client_connection: Option<Arc<Mutex<ClientComponent>>>,
         started: Arc<AtomicBool>,
         runtime: Option<Arc<Runtime>>,
-        address: String,
+        tcp_settings: Arc<TcpSettings>,
         network_side: NetworkSide,
         connection_name: String,
         clients_connected: Arc<Mutex<HashMap<Uuid,ClientComponent>>>,
@@ -56,9 +78,9 @@ pub trait ConnectionTrait{
 }
 
 pub trait ConnectionsTrait{
-    fn make_tcp_connection(&mut self, address: String, connection_name: String);
-    fn remove_connection(&mut self, connection_name: String);
-    fn can_connect(&mut self, connection_name: &String) -> bool;
+    fn make_tcp_connection(&mut self, tcp_settings: TcpSettings, connection_name: String);
+    fn remove_connection(&mut self, connection_name: &str);
+    fn can_connect(&mut self, connection_name: &str) -> bool;
 }
 
 #[derive(Event)]
@@ -111,6 +133,17 @@ pub fn register_message_type<T: MessageTrait>(app: &mut App){
     register_message_type!(T, &DISPATCHERS);
 }
 
+impl Default for TcpSettings {
+    fn default() -> Self {
+        TcpSettings{
+            address: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+            port: 0000,
+            bytes: BytesOptions::U32,
+            order: OrderOptions::LittleEndian
+        }
+    }
+}
+
 impl Drop for ConnectionType{
     fn drop(&mut self){
         match self {
@@ -151,7 +184,7 @@ impl ConnectionTrait for ConnectionType{
                 local_client_connection: _local_client_connection,
                 started,
                 runtime,
-                address,
+                tcp_settings,
                 network_side,
                 receiver_connection_stabilized,
                 connection_name,
@@ -171,9 +204,10 @@ impl ConnectionTrait for ConnectionType{
                     let new_runtime =  Arc::new(Runtime::new().unwrap());
                     let weak_runtime = Arc::downgrade(&new_runtime);
                     let client_weak_runtime = Arc::downgrade(&new_runtime);
-                    let address_clone = address.clone();
+                    let address_clone = (tcp_settings.address.clone(), tcp_settings.port);
                     let clients_connected_arc = Arc::downgrade(&clients_connected);
                     let connection_name_clone = connection_name.clone();
+                    let weak_settings = Arc::downgrade(tcp_settings);
 
                     *receiver_connection_stabilized = Some(receiver);
                     *runtime = Some(new_runtime);
@@ -233,6 +267,7 @@ impl ConnectionTrait for ConnectionType{
                                                 listening: false,
                                                 runtime: Some(Weak::clone(&client_weak_runtime)),
                                                 connection_dropped: Arc::new(AtomicBool::new(false)),
+                                                tcp_settings: Weak::clone(&weak_settings),
                                                 uuid
                                             };
 
@@ -259,8 +294,9 @@ impl ConnectionTrait for ConnectionType{
                     let (sender_message, receiver_message) = unbounded_channel::<(Box<dyn MessageTrait>,Option<Uuid>)>();
                     let new_runtime =  Arc::new(Runtime::new().unwrap());
                     let weak_runtime = Arc::downgrade(&new_runtime);
-                    let address_clone = address.clone();
+                    let address_clone = (tcp_settings.address.clone(), tcp_settings.port);
                     let started_arc = Arc::downgrade(&started);
+                    let weak_tcp_settings = Arc::downgrade(tcp_settings).upgrade().unwrap();
 
                     *receiver_local_tcp_connected = Some(receiver);
                     *runtime = Some(new_runtime);
@@ -295,10 +331,8 @@ impl ConnectionTrait for ConnectionType{
                             loop {
                                 let mut read_half_mutex = read_half.lock().await;
 
-                                match read_half_mutex.read_u32().await {
-                                    Ok(length) => {
-                                        let mut buf = vec![0u8; length as usize];
-
+                                match read_value_from_settings(&mut read_half_mutex, &weak_tcp_settings).await {
+                                    Ok(mut buf) => {
                                         match read_half_mutex.read_exact(&mut buf).await {
                                             Ok(_) => {
                                                 if let Some(message) = deserialize_message(&buf) {
@@ -309,7 +343,7 @@ impl ConnectionTrait for ConnectionType{
                                                         Err(e) => println!("Error sending message: {:?}", e)
                                                     };
                                                 } else {
-                                                    println!("Mensagem não registrada ou falha na desserialização");
+                                                    println!("Mensage not registered or failed to deserialize message");
                                                 }
                                             },
                                             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof
@@ -361,7 +395,7 @@ impl ConnectionTrait for ConnectionType{
                 local_client_connection: _local_client_connection,
                 started,
                 runtime: _runtime,
-                address: _address,
+                tcp_settings: _tcp_settings,
                 network_side: _network_side,
                 receiver_connection_stabilized: _receiver_connection_stabilized,
                 ..
@@ -384,7 +418,7 @@ impl ConnectionTrait for ConnectionType{
 }
 
 impl ConnectionsTrait for ConnectionsServer{
-    fn make_tcp_connection(&mut self, address: String, connection_name: String){
+    fn make_tcp_connection(&mut self, tcp_settings: TcpSettings, connection_name: String){
         if !self.can_connect(&connection_name) {return;}
 
         let connection_name_clone = connection_name.clone();
@@ -395,7 +429,7 @@ impl ConnectionsTrait for ConnectionsServer{
             local_client_connection: None,
             started: Arc::new(AtomicBool::new(false)),
             runtime: None,
-            address,
+            tcp_settings: Arc::new(tcp_settings),
             network_side: NetworkSide::Server,
             connection_name: connection_name_clone,
             clients_connected: Arc::new(Mutex::new(HashMap::new())),
@@ -406,22 +440,22 @@ impl ConnectionsTrait for ConnectionsServer{
         });
     }
 
-    fn remove_connection(&mut self, connection_name: String){
-        let _ = match self.0.get_mut(&connection_name) {
+    fn remove_connection(&mut self, connection_name: &str){
+        let _ = match self.0.get_mut(connection_name) {
             Some(connection) => connection,
             None => {return;}
         };
 
-        self.0.remove(&connection_name);
+        self.0.remove(connection_name);
     }
 
-    fn can_connect(&mut self, connection_name: &String) -> bool {
+    fn can_connect(&mut self, connection_name: &str) -> bool {
         !self.0.contains_key(connection_name)
     }
 }
 
 impl ConnectionsTrait for ConnectionsClient{
-    fn make_tcp_connection(&mut self, address: String, connection_name: String){
+    fn make_tcp_connection(&mut self, tcp_settings: TcpSettings, connection_name: String){
         if !self.can_connect(&connection_name) {return;}
 
         let connection_name_clone = connection_name.clone();
@@ -432,7 +466,7 @@ impl ConnectionsTrait for ConnectionsClient{
             local_client_connection: None,
             started: Arc::new(AtomicBool::new(false)),
             runtime: None,
-            address,
+            tcp_settings: Arc::new(tcp_settings),
             network_side: NetworkSide::Client,
             connection_name : connection_name_clone,
             clients_connected: Arc::new(Mutex::new(HashMap::new())),
@@ -443,16 +477,16 @@ impl ConnectionsTrait for ConnectionsClient{
         });
     }
 
-    fn remove_connection(&mut self, connection_name: String){
-        let _ = match self.0.get_mut(&connection_name) {
+    fn remove_connection(&mut self, connection_name: &str){
+        let _ = match self.0.get_mut(connection_name) {
             Some(connection) => connection,
             None => {return;}
         };
 
-        self.0.remove(&connection_name);
+        self.0.remove(connection_name);
     }
 
-    fn can_connect(&mut self, connection_name: &String) -> bool {
+    fn can_connect(&mut self, connection_name: &str) -> bool {
         !self.0.contains_key(connection_name)
     }
 }
